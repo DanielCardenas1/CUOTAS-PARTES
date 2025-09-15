@@ -1,0 +1,9 @@
+python-dotenv==1.1.1
+SQLAlchemy==2.0.43
+mysqlclient==2.2.7
+pandas==2.3.2
+openpyxl==3.1.5
+reportlab==4.4.3
+fpdf2==2.7.9
+python-dateutil==2.9.0.post0
+
