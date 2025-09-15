@@ -1,0 +1,31 @@
+# Entornos virtuales
+.venv/
+venv/
+
+# VSCode settings
+.vscode/
+
+# Archivos compilados de Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Archivos temporales
+*.log
+*.tmp
+
+# Archivos de sistema
+.DS_Store
+Thumbs.db
+
+# Archivos de pruebas/debug
+*.sqlite3
+*.db
+
+# Archivos de Jupyter (por si usas notebooks)
+.ipynb_checkpoints/
+
+# Reportes o exportaciones temporales
+*.xlsx
+*.csv
