@@ -1,0 +1,16 @@
+version: "3.9"
+services:
+  db:
+    image: mysql:8.0
+    container_name: liquidaciones_mysql
+    environment:
+      - MYSQL_ROOT_PASSWORD=root
+      - MYSQL_DATABASE=liquidaciones
+      - MYSQL_USER=liq_user
+      - MYSQL_PASSWORD=liq_pass
+    ports:
+      - "3306:3306"
+    volumes:
+      - dbdata:/var/lib/mysql
+volumes:
+  dbdata:
