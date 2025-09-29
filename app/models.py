@@ -83,3 +83,23 @@ class IpcAnual(Base):
     __tablename__ = "ipc_anual"
     anio = Column(Integer, primary_key=True)
     valor = Column(DECIMAL(9,6), nullable=False)
+
+# Registro y trazabilidad de cuentas de cobro emitidas
+class CuentaCobro(Base):
+    __tablename__ = "cuenta_cobro"
+    cuenta_cobro_id = Column(BIGINT, primary_key=True, autoincrement=True)
+    consecutivo = Column(Integer, nullable=False, unique=True)
+    nit_entidad = Column(VARCHAR(30), nullable=False)
+    empresa = Column(VARCHAR(200))
+    pensionado_identificacion = Column(VARCHAR(30), nullable=False)
+    pensionado_nombre = Column(VARCHAR(200))
+    periodo_inicio = Column(DATE, nullable=False)
+    periodo_fin = Column(DATE, nullable=False)
+    total_capital = Column(DECIMAL(18,2))
+    total_intereses = Column(DECIMAL(18,2))
+    total_liquidacion = Column(DECIMAL(18,2))
+    archivo_pdf = Column(VARCHAR(255))
+    estado = Column(VARCHAR(20))  # EMITIDA, ANULADA, CORREGIDA, etc.
+    version = Column(Integer)
+    fecha_creacion = Column(DATETIME)
+    fecha_actualizacion = Column(DATETIME)

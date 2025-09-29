@@ -1,4 +1,3 @@
--- Script SQL para crear todas las tablas principales en el orden correcto
 SET FOREIGN_KEY_CHECKS = 0;
 
 DROP TABLE IF EXISTS pago;
@@ -7,6 +6,7 @@ DROP TABLE IF EXISTS pensionado;
 DROP TABLE IF EXISTS entidad;
 DROP TABLE IF EXISTS dtf_mensual;
 DROP TABLE IF EXISTS ipc_anual;
+DROP TABLE IF EXISTS liquidacion;
 
 SET FOREIGN_KEY_CHECKS = 1;
 
@@ -18,7 +18,6 @@ CREATE TABLE entidad (
 );
 
 -- 2. Tabla pensionado
-
 CREATE TABLE pensionado (
   pensionado_id BIGINT AUTO_INCREMENT PRIMARY KEY,
   nombre VARCHAR(200),
@@ -88,4 +87,3 @@ CREATE TABLE IF NOT EXISTS liquidacion (
   fecha_actualizacion DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
   FOREIGN KEY (pensionado_id) REFERENCES pensionado(pensionado_id)
 );
--- Puedes agregar más campos según tu modelo, pero este es el esqueleto principal y el orden correcto.

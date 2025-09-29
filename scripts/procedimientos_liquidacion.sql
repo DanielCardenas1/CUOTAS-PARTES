@@ -32,12 +32,13 @@ BEGIN
     DECLARE v_inicio        DATE;
     DECLARE v_fin           DATE;
     DECLARE v_prev_month_start DATE;
-    DECLARE v_pago_id BIGINT DEFAULT NULL;
+    DECLARE v_liquidacion_id BIGINT DEFAULT NULL;
     DECLARE v_total_prev DECIMAL(18,2);
     DECLARE v_cap_prev   DECIMAL(18,2);
     DECLARE v_int_prev   DECIMAL(18,2);
     DECLARE v_fecha_creacion DATETIME;
     DECLARE v_fecha_actualizacion DATETIME;
+    DECLARE v_estado VARCHAR(10);
 
     main_block: BEGIN
 
@@ -91,20 +92,32 @@ BEGIN
             WHERE YEAR(periodo) = YEAR(v_inicio) AND MONTH(periodo) = MONTH(v_inicio)
             LIMIT 1;
             IF v_dtf_ea IS NULL THEN SET v_dtf_ea = 0; END IF;
-            -- La tasa ya está en decimales, no dividir entre 100
-            SET v_interes = ROUND( v_capital * ( POW(1 + v_dtf_ea, v_dias_mes/365.0 ) - 1 ), 2 );
+                -- La tasa es anual, así que el interés es capital * (tasa anual / 12)
+                SET v_interes = ROUND(v_capital * (v_dtf_ea / 12), 2);
         ELSE
             SET v_interes = 0;
         END IF;
         SET v_total = v_capital + v_interes;
 
-        -- 7) Buscar si ya existe liquidación para ese pensionado y periodo
-        SELECT p.pago_id, p.valor, p.capital, p.interes, p.fecha_creacion, p.fecha_actualizacion
-        INTO   v_pago_id,  v_total_prev, v_cap_prev, v_int_prev, v_fecha_creacion, v_fecha_actualizacion
-        FROM pago p
-        WHERE p.pensionado_id = v_pensionado_id
-          AND p.fecha_pago    = v_inicio
-        LIMIT 1;
+                -- 7) Buscar si ya existe liquidación para ese pensionado y periodo
+                SELECT l.liquidacion_id, l.valor, l.capital, l.interes, l.fecha_creacion, l.fecha_actualizacion
+                INTO   v_liquidacion_id,  v_total_prev, v_cap_prev, v_int_prev, v_fecha_creacion, v_fecha_actualizacion
+                FROM liquidacion l
+                WHERE l.identificacion = p_identificacion
+                    AND l.periodo_inicio = v_inicio
+                LIMIT 1;
+
+                -- 8) Determinar estado (al día/en mora) según pagos
+                SELECT COUNT(*) INTO @pagos_count
+                FROM pago p
+                WHERE p.identificacion = p_identificacion
+                  AND p.periodo_inicio = v_inicio
+                  AND p.valor >= v_total;
+                IF @pagos_count > 0 THEN
+                    SET v_estado = 'al día';
+                ELSE
+                    SET v_estado = 'en mora';
+                END IF;
 
         -- 8) Persistencia y control de duplicados según p_modo
         IF p_modo = 'preview' THEN
@@ -116,7 +129,7 @@ BEGIN
                 v_interes           AS interes_calculado,
                 v_total             AS total_calculado,
                 (v_pago_id IS NOT NULL) AS es_duplicado,
-                v_pago_id           AS pago_existente_id,
+                v_pago_id           AS liquidacion_existente_id,
                 v_cap_prev          AS capital_existente,
                 v_int_prev          AS interes_existente,
                 v_total_prev        AS total_existente,
@@ -126,51 +139,56 @@ BEGIN
         END IF;
 
         IF p_modo = 'crear' THEN
-            IF v_pago_id IS NOT NULL THEN
+            IF v_liquidacion_id IS NOT NULL THEN
                 SELECT
                     'DUPLICADO'   AS estado,
-                    v_pago_id     AS pago_existente_id,
+                    v_liquidacion_id     AS liquidacion_existente_id,
                     v_inicio      AS periodo_inicio,
                     v_fin         AS periodo_fin,
                     v_total_prev  AS total_existente,
                     v_fecha_creacion AS fecha_creacion,
-                    v_fecha_actualizacion AS fecha_actualizacion;
+                    v_fecha_actualizacion AS fecha_actualizacion,
+                    v_estado      AS estado;
                 LEAVE main_block;
             ELSE
-                INSERT INTO pago (pensionado_id, fecha_pago, valor, capital, interes, observaciones)
-                VALUES (v_pensionado_id, v_inicio, v_total, v_capital, v_interes, 'Liquidación generada (crear)');
+                INSERT INTO liquidacion (nombre, identificacion, periodo_inicio, periodo_fin, total, capital, interes, fecha_creacion, estado)
+                SELECT p.nombre, p.identificacion, v_inicio, v_fin, v_total, v_capital, v_interes, NOW(), v_estado
+                FROM pensionado p WHERE p.identificacion = p_identificacion;
                 SELECT
                     'CREADO'        AS estado,
-                    LAST_INSERT_ID() AS pago_id,
+                    LAST_INSERT_ID() AS liquidacion_id,
                     v_inicio        AS periodo_inicio,
                     v_fin           AS periodo_fin,
                     v_capital       AS capital,
                     v_interes       AS interes,
-                    v_total         AS total;
+                    v_total         AS total,
+                    NOW()           AS fecha_creacion,
+                    v_estado        AS estado;
                 LEAVE main_block;
             END IF;
         END IF;
 
         IF p_modo = 'reprocesar' THEN
-            IF v_pago_id IS NOT NULL THEN
+            IF v_liquidacion_id IS NOT NULL THEN
                 -- Guardar histórico del valor anterior
-                INSERT INTO pago_historial (
-                    pago_id, fecha_version, valor_anterior, capital_anterior, interes_anterior, motivo
+                INSERT INTO liquidacion_detalle (
+                    liquidacion_id, fecha_version, valor_anterior, capital_anterior, interes_anterior, motivo
                 ) VALUES (
-                    v_pago_id, NOW(), v_total_prev, v_cap_prev, v_int_prev, 'Reproceso solicitado'
+                    v_liquidacion_id, NOW(), v_total_prev, v_cap_prev, v_int_prev, 'Reproceso solicitado'
                 );
 
                 -- Actualizar el registro existente con los nuevos cálculos
-                UPDATE pago
-                SET valor = v_total,
+                UPDATE liquidacion
+                SET total = v_total,
                     capital = v_capital,
                     interes = v_interes,
-                    observaciones = CONCAT('Reprocesado ', DATE_FORMAT(NOW(), '%Y-%m-%d %H:%i'))
-                WHERE pago_id = v_pago_id;
+                    fecha_actualizacion = NOW(),
+                    estado = v_estado
+                WHERE liquidacion_id = v_liquidacion_id;
 
                 SELECT
                     'REPROCESADO' AS estado,
-                    v_pago_id     AS pago_id,
+                    v_liquidacion_id     AS liquidacion_id,
                     v_inicio      AS periodo_inicio,
                     v_fin         AS periodo_fin,
                     v_capital     AS capital_nuevo,
@@ -178,20 +196,24 @@ BEGIN
                     v_total       AS total_nuevo,
                     v_total_prev  AS total_anterior,
                     v_fecha_creacion AS fecha_creacion,
-                    v_fecha_actualizacion AS fecha_actualizacion;
+                    NOW()         AS fecha_actualizacion,
+                    v_estado      AS estado;
                 LEAVE main_block;
             ELSE
                 -- No existía: lo creamos
-                INSERT INTO pago (pensionado_id, fecha_pago, valor, capital, interes, observaciones)
-                VALUES (v_pensionado_id, v_inicio, v_total, v_capital, v_interes, 'Liquidación generada (reprocesar, no existía)');
+                INSERT INTO liquidacion (nombre, identificacion, periodo_inicio, periodo_fin, valor, capital, interes, fecha_creacion, estado)
+                SELECT p.nombre, p.identificacion, v_inicio, v_fin, v_total, v_capital, v_interes, NOW(), v_estado
+                FROM pensionado p WHERE p.identificacion = p_identificacion;
                 SELECT
                     'CREADO'         AS estado,
-                    LAST_INSERT_ID() AS pago_id,
+                    LAST_INSERT_ID() AS liquidacion_id,
                     v_inicio         AS periodo_inicio,
                     v_fin            AS periodo_fin,
                     v_capital        AS capital,
                     v_interes        AS interes,
-                    v_total          AS total;
+                    v_total          AS total,
+                    NOW()            AS fecha_creacion,
+                    v_estado         AS estado;
                 LEAVE main_block;
             END IF;
         END IF;
