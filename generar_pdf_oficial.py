@@ -8,6 +8,7 @@ Crea un PDF profesional con formato exacto al documento oficial
 
 import sys
 import os
+import re
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
 from datetime import date, datetime
@@ -21,7 +22,13 @@ from reportlab.lib.enums import TA_CENTER, TA_LEFT, TA_RIGHT
 from reportlab.pdfgen import canvas
 
 # Importar funciones del sistema funcionando
-from mostrar_liquidacion_36 import generar_36_cuentas_pensionado, generar_36_cuentas_pensionado_oct, generar_36_cuentas_pensionado_custom
+from mostrar_liquidacion_36 import (
+    generar_cuentas_prescripcion,
+    generar_cuentas_prescripcion_oct,
+    generar_cuentas_prescripcion_custom,
+    obtener_dtf_mes,
+    calcular_interes_mensual_unico,
+)
 from app.db import get_session, engine
 from sqlalchemy import text
 from sqlalchemy import select, func
@@ -73,7 +80,7 @@ def _ensure_unique_filename(base_name: str) -> str:
     ts = datetime.now().strftime('%Y%m%d%H%M%S')
     return f"{base}_{ts}{ext}"
 
-def generar_pdf_para_pensionado(pensionado, periodo='sep', año_inicio=None, mes_inicio=None):
+def generar_pdf_para_pensionado(pensionado, periodo='sep', año_inicio=None, mes_inicio=None, solo_mes: bool = False, output_dir: str | None = None):
     """Genera un PDF para un pensionado ya consultado.
 
     Espera una tupla en el siguiente orden (para compatibilidad con mostrar_liquidacion_36):
@@ -87,36 +94,84 @@ def generar_pdf_para_pensionado(pensionado, periodo='sep', año_inicio=None, mes
         mes_inicio: Mes de inicio para período custom
     """
     # Generar datos usando el sistema funcionando según el período
-    fecha_corte = date(2025, 8, 31)  # Última fecha válida (agosto 2025)
+    # Fecha de corte: agosto 2025. Se generan los últimos 30 meses hasta esta fecha (septiembre no se toma por facturar)
+    fecha_corte = date(2025, 8, 31)
     
     if periodo == 'oct':
-        cuentas = generar_36_cuentas_pensionado_oct(pensionado, fecha_corte)
+        cuentas = generar_cuentas_prescripcion_oct(pensionado, fecha_corte)
     elif periodo == 'custom':
         if año_inicio is None or mes_inicio is None:
             raise ValueError("Para período 'custom' se requieren --año-inicio y --mes-inicio")
         
-        # Para período custom, calcular hasta la fecha de corte válida (no 36 meses fijos)
+        # Para período custom, calcular hasta la fecha de corte válida
         fecha_inicio = date(año_inicio, mes_inicio, 1)
-        # Si la fecha de inicio es posterior al corte, error
         if fecha_inicio > fecha_corte:
             raise ValueError(f"La fecha de inicio ({fecha_inicio}) no puede ser posterior a agosto 2025")
-        
-        # Calcular número de meses desde inicio hasta fecha_corte
+
         from dateutil.relativedelta import relativedelta
-        meses_disponibles = (fecha_corte.year - fecha_inicio.year) * 12 + (fecha_corte.month - fecha_inicio.month) + 1
-        
-        cuentas = generar_36_cuentas_pensionado_custom(pensionado, año_inicio, mes_inicio, fecha_corte, meses_disponibles)
+
+        if solo_mes:
+            # Obtener la cuenta base del mes seleccionado (1 registro) para conocer capital base y prima
+            base_list = generar_cuentas_prescripcion_custom(pensionado, año_inicio, mes_inicio, fecha_corte, num_meses=1)
+            if not base_list:
+                cuentas = []
+            else:
+                base_cuenta = base_list[0]
+                # Capital para la cuenta (valor del periodo): incluye prima solo del MES DE LA CUENTA (fijo)
+                capital_periodo = base_cuenta.get('valor_cuota_periodo', base_cuenta.get('capital', 0))
+                # No duplicar prima en filas posteriores del timeline: capital será fijo (capital_periodo)
+                capital_base_col = capital_periodo
+
+                # Construir timeline: desde el mes de la cuenta hasta fecha_corte, con capital fijo (capital_periodo)
+                cuentas = []
+                actual = fecha_inicio
+                while actual <= fecha_corte:
+                    # Interés de este renglón usando DTF y días del mismo mes
+                    interes_mes = calcular_interes_mensual_unico(capital_periodo, actual, fecha_corte)
+
+                    # DTF y días del mismo mes
+                    dtf_val = obtener_dtf_mes(actual.year, actual.month)
+                    # Calcular días del mes completo
+                    if actual.month == 12:
+                        fin_mes = date(actual.year + 1, 1, 1)
+                    else:
+                        fin_mes = date(actual.year, actual.month + 1, 1)
+                    dias_mes = (fin_mes - date(actual.year, actual.month, 1)).days
+
+                    cuentas.append({
+                        'año': actual.year,
+                        'mes': actual.month,
+                        'fecha_cuenta': date(actual.year, actual.month, 1),
+                        'capital': capital_periodo,                # Fijo en todo el timeline
+                        'capital_base': capital_base_col,          # Fijo en todo el timeline
+                        'valor_cuota_periodo': capital_periodo,    # Fijo en todo el timeline
+                        'interes': interes_mes,
+                        'prima': 0,                                # No duplicar prima en meses posteriores
+                        'porcentaje_cuota': base_cuenta.get('porcentaje_cuota', 0),
+                        'base_calculo': base_cuenta.get('base_calculo', 0),
+                        'base_ajustada_ipc': base_cuenta.get('base_ajustada_ipc', 0),
+                        'ipc_factor': base_cuenta.get('ipc_factor', 1),
+                        'dias_interes': dias_mes,
+                        'dtf_interes': dtf_val,
+                    })
+
+                    actual = actual + relativedelta(months=1)
+        else:
+            meses_disponibles = (fecha_corte.year - fecha_inicio.year) * 12 + (fecha_corte.month - fecha_inicio.month) + 1
+            cuentas = generar_cuentas_prescripcion_custom(pensionado, año_inicio, mes_inicio, fecha_corte, meses_disponibles)
     else:
-        cuentas = generar_36_cuentas_pensionado(pensionado, fecha_corte)
+        cuentas = generar_cuentas_prescripcion(pensionado, fecha_corte)
     
-    # Calcular totales: para presentación masiva queremos mostrar el capital
-    # adeudado como el capital base (único), no la suma de los 36 meses.
-    # El interés sí se acumula (suma de intereses mensuales).
+    # Totales: capital pendiente + suma de intereses mensuales
     if cuentas:
-        capital_unico = cuentas[0].get('capital_base', cuentas[0].get('capital', 0))
+        # Si existe 'valor_cuota_periodo' (modo solo_mes), usarlo como capital pendiente de la cuenta;
+        # en caso contrario, mantener base simple única (modo consolidado de 30 cuentas)
+        base_simple = cuentas[0].get('capital', cuentas[0].get('capital_base', 0))
+        capital_periodo = cuentas[0].get('valor_cuota_periodo', None)
     else:
-        capital_unico = 0.0
-    total_capital = capital_unico
+        base_simple = 0.0
+        capital_periodo = None
+    total_capital = capital_periodo if capital_periodo is not None else base_simple
     total_intereses = sum(c['interes'] for c in cuentas)
     total_final = total_capital + total_intereses
     
@@ -141,13 +196,41 @@ def generar_pdf_para_pensionado(pensionado, periodo='sep', año_inicio=None, mes
     else:
         periodo_texto = 'PERÍODO NO DISPONIBLE'
     
-    # Crear archivo PDF con nombre único para evitar PermissionError
-    base_name = f"LIQUIDACION_CUOTAS_PARTES_{pensionado[0]}_{date.today().strftime('%Y%m%d')}_v2.pdf"
-    nombre_archivo = _ensure_unique_filename(base_name)
-    
+    # Crear archivo PDF con nombre personalizado <nit>_<Mes>_<Año>.pdf en la carpeta especificada
+    meses_nombres = ["Enero", "Febrero", "Marzo", "Abril", "Mayo", "Junio", "Julio", "Agosto", "Septiembre", "Octubre", "Noviembre", "Diciembre"]
+    mes_nombre = meses_nombres[fecha_inicio.month - 1]
+    nombre_archivo = f"{pensionado[0]}_{mes_nombre}_{fecha_inicio.year}.pdf"
+    # Guardar PDF en la carpeta 'reportes_liquidacion' dentro del proyecto
+    # Soporta un directorio base externo (por entidad) y subcarpeta por pensionado
+    base_dir = output_dir if output_dir else os.path.join(os.path.dirname(__file__), 'reportes_liquidacion')
+    # Subcarpeta del pensionado: <PrimerApellido>_<SegundoApellido>_<Identificación> (si hay dos apellidos)
+    nombre_completo = str(pensionado[1]) if len(pensionado) > 1 and pensionado[1] else ''
+    if ',' in nombre_completo:
+        bloque_apellidos = nombre_completo.split(',')[0].strip()
+    else:
+        bloque_apellidos = nombre_completo.strip()
+    partes = [p for p in bloque_apellidos.split() if p]
+    ap1 = partes[0] if partes else ''
+    ap2 = partes[1] if len(partes) > 1 else ''
+    # Sanitizar: solo letras, números, guiones y guiones bajos; capitalizar
+    ap1 = re.sub(r"[^A-Za-zÁÉÍÓÚÜÑáéíóúüñ0-9_-]", '', ap1).strip()
+    ap2 = re.sub(r"[^A-Za-zÁÉÍÓÚÜÑáéíóúüñ0-9_-]", '', ap2).strip()
+    if ap1 and ap2:
+        carpeta_pensionado = f"{ap1.title()}_{ap2.title()}_{pensionado[0]}"
+    elif ap1:
+        carpeta_pensionado = f"{ap1.title()}_{pensionado[0]}"
+    else:
+        carpeta_pensionado = str(pensionado[0])
+    carpeta_reportes = os.path.join(base_dir, carpeta_pensionado)
+    if not os.path.exists(carpeta_reportes):
+        os.makedirs(carpeta_reportes, exist_ok=True)
+    ruta_pdf = os.path.join(carpeta_reportes, nombre_archivo)
+    # Asegurar nombre único para evitar conflictos con archivos abiertos/sincronizados
+    ruta_pdf = _ensure_unique_filename(ruta_pdf)
+
     # Configurar documento con márgenes más estrechos
     doc = SimpleDocTemplate(
-        nombre_archivo,
+        ruta_pdf,
         pagesize=A4,
         rightMargin=0.5*cm,
         leftMargin=0.5*cm,
@@ -247,7 +330,8 @@ def generar_pdf_para_pensionado(pensionado, periodo='sep', año_inicio=None, mes
         
         # Crear o actualizar registro de trazabilidad
         ahora = datetime.now()
-        pdf_name_preview = f"LIQUIDACION_CUOTAS_PARTES_{pensionado[0]}_{date.today().strftime('%Y%m%d')}_v2.pdf"
+        # Guardar en BD el nombre real del PDF generado (sin la ruta completa)
+        pdf_name_preview = os.path.basename(ruta_pdf)
         if existente is None:
             reg = CuentaCobro(
                 consecutivo=consecutivo_cc,
@@ -417,6 +501,18 @@ def generar_pdf_para_pensionado(pensionado, periodo='sep', año_inicio=None, mes
     
     # Datos de la tabla
     table_data = [headers]
+
+    # Capital fijo para toda la tabla (solo_mes): usar valor_cuota_periodo del mes de la cuenta
+    capital_general = None
+    if cuentas:
+        if solo_mes:
+            vcp = cuentas[0].get('valor_cuota_periodo', cuentas[0].get('capital', 0))
+            capital_general = float(vcp)
+        else:
+            # Fallback: detectar igualdad de VCP entre filas
+            ref_vcp = cuentas[0].get('valor_cuota_periodo', None)
+            if ref_vcp is not None and all(abs(float(c.get('valor_cuota_periodo', ref_vcp)) - float(ref_vcp)) < 1e-6 for c in cuentas):
+                capital_general = float(ref_vcp)
     
     # Estilos para celdas de datos
     data_style_left = ParagraphStyle('DataLeft', parent=styles['Normal'], fontSize=6, fontName='Helvetica', alignment=TA_LEFT, leading=7)
@@ -429,20 +525,25 @@ def generar_pdf_para_pensionado(pensionado, periodo='sep', año_inicio=None, mes
     for cuenta in cuentas:
         mes_nombre = meses_nombres[cuenta['mes'] - 1]
         año = cuenta['año']
-        
-        # Mostrar en la tabla el capital base (no duplicado). El interés se
-        # calcula sobre el capital que incluye la prima cuando corresponde, pero
-        # para la presentación individual queremos siempre mostrar el capital base.
-        valor_cuota_periodo = cuenta.get('capital_base', cuenta.get('capital', 0))
-        
+
+        if capital_general is not None:
+            # Cuenta de un solo mes: capital fijo para todas las filas; recalcular intereses por cada mes
+            capital_base_fijo = capital_general
+            vr_cuota = capital_general
+            interes_mes = calcular_interes_mensual_unico(capital_base_fijo, cuenta['fecha_cuenta'], fecha_corte)
+        else:
+            # 30 meses: usar valores por fila
+            vr_cuota = cuenta.get('valor_cuota_periodo', cuenta.get('capital', 0))
+            capital_base_fijo = cuenta.get('capital_base', cuenta.get('capital', 0))
+            interes_mes = cuenta.get('interes', 0)
+
         fila = [
             Paragraph(f"{mes_nombre.capitalize()}-{año}", data_style_left),
-            Paragraph(f"${valor_cuota_periodo:,.2f}", data_style_right),
+            Paragraph(f"${vr_cuota:,.2f}", data_style_right),
             Paragraph(f"{cuenta['dias_interes']:d}", data_style_center),
             Paragraph(f"{cuenta['dtf_interes']:.2f}%", data_style_center),
-            Paragraph(f"${cuenta['interes']:,.2f}", data_style_right),
-            # Mostrar capital base en la columna final (no duplicado)
-            Paragraph(f"${cuenta.get('capital_base', cuenta.get('capital', 0)):,.2f}", data_style_right)
+            Paragraph(f"${interes_mes:,.2f}", data_style_right),
+            Paragraph(f"${capital_base_fijo:,.2f}", data_style_right)
         ]
         table_data.append(fila)
     
@@ -450,20 +551,26 @@ def generar_pdf_para_pensionado(pensionado, periodo='sep', año_inicio=None, mes
     total_style_center = ParagraphStyle('TotalCenter', parent=styles['Normal'], fontSize=7, fontName='Helvetica-Bold', alignment=TA_CENTER, leading=8)
     total_style_right = ParagraphStyle('TotalRight', parent=styles['Normal'], fontSize=7, fontName='Helvetica-Bold', alignment=TA_RIGHT, leading=8)
     
-    # Calcular total de cuota parte periodo usando siempre el capital base
-    total_cuota_parte_periodo = sum(c.get('capital_base', c.get('capital', 0)) for c in cuentas)
+    # Total de cuota parte del periodo (no se muestra como suma en tabla; usamos totales de cabecera)
+    total_cuota_parte_periodo = sum(c.get('valor_cuota_periodo', c.get('capital', 0)) for c in cuentas)
     
-    # Fila de totales (mostrar intereses sumados; mostrar capital como capital único)
-    fila_totales = [
-        Paragraph("TOTAL", total_style_center),
-        Paragraph(f"${total_cuota_parte_periodo:,.2f}", total_style_right),
-        Paragraph("", total_style_center),
-        Paragraph("", total_style_center),
-        Paragraph(f"${total_intereses:,.2f}", total_style_right),
-        Paragraph(f"${total_capital:,.2f}", total_style_right)
+    # Eliminar la fila de totales en la tabla de intereses para periodos personalizados
+    
+    # Agregar fila de total de intereses (suma de la columna)
+    if capital_general is not None:
+        suma_intereses_columna = sum(calcular_interes_mensual_unico(capital_general, c['fecha_cuenta'], fecha_corte) for c in cuentas)
+        capital_total_row = capital_general
+    else:
+        suma_intereses_columna = sum(float(c.get('interes', 0)) for c in cuentas)
+        capital_total_row = ''
+    total_row = [
+        Paragraph('TOTAL', ParagraphStyle('TotalHdr', parent=styles['Normal'], fontName='Helvetica-Bold', fontSize=7, alignment=TA_CENTER)),
+        '', '', '',
+        Paragraph(f"${suma_intereses_columna:,.2f}", ParagraphStyle('TotalNum', parent=styles['Normal'], fontName='Helvetica-Bold', fontSize=7, alignment=TA_RIGHT)),
+        Paragraph(f"${capital_total_row:,.2f}", ParagraphStyle('TotalNum', parent=styles['Normal'], fontName='Helvetica-Bold', fontSize=7, alignment=TA_RIGHT)) if capital_general is not None else ''
     ]
-    table_data.append(fila_totales)
-    
+    table_data.append(total_row)
+
     # Crear tabla con 6 columnas (eliminada la redundante)
     col_widths = [2.5*cm, 2.5*cm, 1.2*cm, 1.8*cm, 2.3*cm, 2.7*cm]
     tabla = Table(table_data, colWidths=col_widths, repeatRows=1)
@@ -484,8 +591,8 @@ def generar_pdf_para_pensionado(pensionado, periodo='sep', año_inicio=None, mes
         ('ROWBACKGROUNDS', (0, 1), (-1, -2), [colors.white, colors.lightgrey]),
         
         # Fila de totales
-        ('BACKGROUND', (0, -1), (-1, -1), colors.white),
-        ('TEXTCOLOR', (0, -1), (-1, -1), colors.black),
+    ('BACKGROUND', (0, -1), (-1, -1), colors.white),
+    ('TEXTCOLOR', (0, -1), (-1, -1), colors.black),
         ('VALIGN', (0, -1), (-1, -1), 'MIDDLE'),
         ('TOPPADDING', (0, -1), (-1, -1), 4),
         ('BOTTOMPADDING', (0, -1), (-1, -1), 4),
@@ -504,10 +611,24 @@ def generar_pdf_para_pensionado(pensionado, periodo='sep', año_inicio=None, mes
     
     story.append(tabla)
     
-    # Generar PDF
-    doc.build(story)
-    
-    print(f"✅ PDF creado exitosamente: {nombre_archivo}")
+    # Generar PDF (reintenta con nombre alterno si hay PermissionError)
+    try:
+        doc.build(story)
+    except PermissionError:
+        # Si el archivo está bloqueado (por visor/OneDrive), reintentar con nombre único
+        ruta_pdf_alt = _ensure_unique_filename(ruta_pdf)
+        doc = SimpleDocTemplate(
+            ruta_pdf_alt,
+            pagesize=A4,
+            rightMargin=0.5*cm,
+            leftMargin=0.5*cm,
+            topMargin=1*cm,
+            bottomMargin=1*cm
+        )
+        doc.build(story)
+        ruta_pdf = ruta_pdf_alt
+
+    print(f"✅ PDF creado exitosamente: {ruta_pdf}")
     print(f"🧾 Cuenta de cobro Nro.: {consecutivo_cc}")
     print(f"📊 Total capital: ${total_capital:,.2f}")
     print(f"💰 Total intereses: ${total_intereses:,.2f}")
@@ -519,13 +640,14 @@ def generar_pdf_para_pensionado(pensionado, periodo='sep', año_inicio=None, mes
     print(f"   - Período: {periodo_texto} ({len(cuentas)} meses)")
     print(f"   - Tabla completa con DTF y días por mes")
     print(f"   - Resumen ejecutivo y notas técnicas")
-    
-    return nombre_archivo
+
+    return ruta_pdf
 
 
 def crear_pdf_formato_oficial():
-    """Crea PDFs en modo individual (por defecto) o en lote por NIT/ID."""
+    """Crea PDFs en modo individual (por defecto) o en lote por NIT/ID)."""
     parser = argparse.ArgumentParser(description='Generar PDF(s) de liquidación de cuotas partes')
+    parser.add_argument('--solo-prima', dest='solo_prima', action='store_true', help='Generar solo PDFs de meses con prima (junio y diciembre) en el rango indicado')
     parser.add_argument('--id', dest='identificacion', help='Identificación del pensionado (solo uno)')
     parser.add_argument('--nit', dest='nit_entidad', help='NIT de la entidad para procesar todos sus pensionados')
     parser.add_argument('--consecutivo', dest='consecutivo', type=int, help='Forzar Nro. de cuenta de cobro (no incrementa archivo)')
@@ -583,7 +705,7 @@ def crear_pdf_formato_oficial():
         finally:
             session.close()
 
-    # Caso 3: Sin argumentos -> comportamiento anterior (ejemplo por defecto)
+    # Caso 3: Sin argumentos -> comportamiento anterior o solo prima
     session = get_session()
     try:
         query = text('''SELECT identificacion, nombre, numero_mesadas, 
@@ -595,7 +717,26 @@ def crear_pdf_formato_oficial():
             print("❌ No se encontró pensionado con ID 26489799")
             return
         print(f"✅ Pensionado encontrado: {result[1]} ({result[0]})")
-        generar_pdf_para_pensionado(result, args.periodo, args.año_inicio, args.mes_inicio)
+
+        if args.solo_prima:
+            # Generar PDFs solo para meses con prima (junio y diciembre) en el rango
+            fecha_inicio = date(args.año_inicio or 2022, args.mes_inicio or 9, 1)
+            fecha_fin = date(2025, 8, 31)
+            meses_prima = []
+            actual = fecha_inicio
+            while actual <= fecha_fin:
+                if actual.month in [6, 12]:
+                    meses_prima.append((actual.year, actual.month))
+                # Avanzar al siguiente mes
+                if actual.month == 12:
+                    actual = date(actual.year + 1, 1, 1)
+                else:
+                    actual = date(actual.year, actual.month + 1, 1)
+            for año, mes in meses_prima:
+                print(f"Generando PDF para prima: {mes}/{año}")
+                generar_pdf_para_pensionado(result, 'custom', año, mes)
+        else:
+            generar_pdf_para_pensionado(result, args.periodo, args.año_inicio, args.mes_inicio)
     finally:
         session.close()
 

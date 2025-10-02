@@ -10,3 +10,6 @@ DB_PASS = os.getenv("DB_PASS", "liq_pass")
 
 CONSECUTIVO_PREFIJO = os.getenv("CONSECUTIVO_PREFIJO", "CCP-")
 DIAS_SILENCIO_ADMIN = int(os.getenv("DIAS_SILENCIO_ADMIN", "15"))
+
+# Meses de prescripción para generación de cuentas (antes 36, ahora 30)
+MESES_PRESCRIPCION = int(os.getenv("MESES_PRESCRIPCION", "30"))

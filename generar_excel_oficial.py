@@ -199,7 +199,7 @@ def crear_excel_formato_oficial():
     
     # NOTAS AL FINAL
     row += 3
-    ws[f'A{row}'] = f"Total capital correspondiente a los 36 cuentas desde 01 de sep de 2022 a 31 de ago de 2025"
+    ws[f'A{row}'] = f"Total capital correspondiente a las 30 cuentas de los últimos 30 meses"
     ws[f'A{row}'].font = font_normal
     ws[f'B{row}'] = total_capital
     ws[f'B{row}'].number_format = '"$"#,##0.00'
@@ -239,7 +239,7 @@ def crear_excel_formato_oficial():
     print(f"\n📋 Resumen:")
     print(f"   - Pensionado: {pensionado[1]}")
     print(f"   - Identificación: {pensionado[0]}")
-    print(f"   - Período: Sep 2022 → Ago 2025 (36 meses)")
+    print(f"   - Período: Últimos 30 meses (mes vencido)")
     print(f"   - Formato: Exacto como HOS_890201488.xlsx")
     
     return nombre_archivo

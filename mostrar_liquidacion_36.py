@@ -1,34 +1,3 @@
-def obtener_ipc_desde_bd(año_inicio, año_fin):
-    """Obtiene el IPC acumulado desde BD"""
-    session = get_session()
-    try:
-        query = text("SELECT anio, valor FROM ipc_anual WHERE anio >= :inicio AND anio <= :fin ORDER BY anio")
-        result = session.execute(query, {'inicio': año_inicio, 'fin': año_fin}).fetchall()
-        ipc_acumulado = 1.0
-        for row in result:
-            ipc_valor = float(row[1])
-            ipc_acumulado *= ipc_valor
-        return ipc_acumulado
-    except Exception as e:
-        print(f"Error consultando IPC: {e}")
-        return 1.0
-    finally:
-        session.close()
-from app.db import get_session
-from sqlalchemy import text
-from datetime import date
-from dateutil.relativedelta import relativedelta
-def tiene_prima_mes(numero_mesadas, mes):
-    """Determina si un pensionado tiene prima en un mes específico"""
-    mesadas = int(numero_mesadas)
-    if mesadas == 12:
-        return False  # Sin prima
-    elif mesadas == 13:
-        return mes == 12  # Solo diciembre
-    elif mesadas == 14:
-        return mes in [6, 12]  # Junio y diciembre
-    else:
-        return False
 def calcular_cartera_mes(pensionado, año, mes, fecha_fin):
     """
     Calcula la cartera de la cuenta de cobro de un mes específico:
@@ -48,9 +17,6 @@ def calcular_cartera_mes(pensionado, año, mes, fecha_fin):
     # Ajustar base de cálculo de 2025 al año de la cuenta de cobro usando IPC
     base_ajustada_ipc = ajustar_base_por_ipc(base_calculo, año)
     capital_fijo_mes = base_ajustada_ipc * porcentaje_cuota_parte
-    # Si el mes tiene prima, duplicar el capital
-    if tiene_prima_mes(numero_mesadas, mes):
-        capital_fijo_mes = capital_fijo_mes * 2
 
     fecha_inicio = date(año, mes, 1)
     fecha_corte = fecha_fin
@@ -92,7 +58,92 @@ def calcular_consolidado_global(pensionado, fecha_inicio, fecha_fin):
     base_ajustada_ipc = ajustar_base_por_ipc(base_calculo, año_cuenta_cobro)
     capital_fijo_tabla = base_ajustada_ipc * porcentaje_cuota_parte
 
+    consolidado = 0.0
+    total_capital = 0.0
+    total_intereses = 0.0
 
+    for i in range(num_meses):
+        fecha_mes = fecha_inicio + relativedelta(months=i)
+        año = fecha_mes.year
+        mes = fecha_mes.month
+        fecha_cuenta = date(año, mes, 1)
+
+        # Prima solo afecta el capital para la cuenta de cobro, NO para intereses
+        prima = 0
+        capital_final = capital_fijo_tabla
+        if tiene_prima_mes(numero_mesadas, mes):
+            prima = capital_fijo_tabla
+            capital_final = capital_fijo_tabla + prima
+
+        # Sumar intereses acumulados desde este mes hasta fecha_fin
+        intereses_acumulados = 0.0
+        for j in range(i, num_meses):
+            fecha_interes = fecha_inicio + relativedelta(months=j)
+            año_int = fecha_interes.year
+            mes_int = fecha_interes.month
+            fecha_cuenta_int = date(año_int, mes_int, 1)
+            interes_mensual = calcular_interes_mensual_unico(capital_fijo_tabla, fecha_cuenta_int, fecha_corte)
+            intereses_acumulados += interes_mensual
+
+        cartera_mes = capital_fijo_tabla + intereses_acumulados
+        consolidado += cartera_mes
+        total_capital += capital_fijo_tabla
+        total_intereses += intereses_acumulados
+
+    return total_capital, total_intereses, consolidado
+#!/usr/bin/env python3
+"""
+Script para mostrar la liquidación de 36 meses en formato tabla
+"""
+
+import sys
+sys.path.append('.')
+
+from datetime import date
+from dateutil.relativedelta import relativedelta
+from app.db import get_session
+from sqlalchemy import text
+
+def obtener_ipc_desde_bd(año_inicial, año_final):
+    """Obtiene el IPC acumulado desde la base de datos entre dos años"""
+    session = get_session()
+    
+    try:
+        ipc_acumulado = 1.0
+        
+        for año in range(año_inicial + 1, año_final + 1):  # Desde año siguiente hasta año final
+            query = text("SELECT valor FROM ipc_anual WHERE anio = :año")
+            result = session.execute(query, {'año': año}).fetchone()
+            
+            if result:
+                ipc_decimal = float(result[0])  # Valor decimal (ej: 0.0105)
+                factor_ipc = 1.0 + ipc_decimal  # Convertir a factor (ej: 1.0105)
+                ipc_acumulado *= factor_ipc
+            else:
+                # Si no encuentra el año, usar un valor por defecto
+                ipc_acumulado *= 1.03  # 3% por defecto
+        
+        return ipc_acumulado
+        
+    except Exception as e:
+        # En caso de error, usar valores por defecto
+        factores_default = {
+            2023: 1.0113,  # 1.13%
+            2024: 1.0109,  # 1.09% 
+            2025: 1.0105   # 1.05%
+        }
+        
+        ipc_acumulado = 1.0
+        for año in range(año_inicial + 1, año_final + 1):
+            if año in factores_default:
+                ipc_acumulado *= factores_default[año]
+            else:
+                ipc_acumulado *= 1.03
+        
+        return ipc_acumulado
+    
+    finally:
+        session.close()
 
 def ajustar_base_por_ipc(base_2025, año_cuenta):
     """Ajusta la base de cálculo de 2025 al año de la cuenta usando datos reales de BD"""
@@ -120,45 +171,85 @@ def obtener_dtf_mes(año, mes):
         query = text("SELECT tasa FROM dtf_mensual WHERE periodo = :fecha")
         result = session.execute(query, {'fecha': fecha_consulta}).fetchone()
         
-        try:
-            # Construir fecha del primer día del mes
-            fecha_consulta = date(año, mes, 1)
+        if result:
+            # La tasa está en decimal, convertir a porcentaje
+            dtf_decimal = float(result[0])
+            dtf_porcentaje = dtf_decimal * 100
+            return dtf_porcentaje
+        else:
+            # Si no se encuentra en BD, usar valor por defecto
+            return 10.0
+            
+    except Exception as e:
+        # En caso de error, usar valor por defecto
+        return 10.0
+    finally:
+        session.close()
 
-            # Consultar DTF desde la base de datos
-            query = text("SELECT tasa FROM dtf_mensual WHERE periodo = :fecha")
-            result = session.execute(query, {'fecha': fecha_consulta}).fetchone()
+def tiene_prima_mes(numero_mesadas, mes):
+    """Determina si un pensionado tiene prima en un mes específico"""
+    mesadas = int(numero_mesadas)
+    
+    if mesadas == 12:
+        return False  # Sin prima
+    elif mesadas == 13:
+        return mes == 12  # Solo diciembre
+    elif mesadas == 14:
+        return mes in [6, 12]  # Junio y diciembre
+    else:
+        return False
 
-            if result:
-                # La tasa está en decimal, convertir a porcentaje
-                dtf_decimal = float(result[0])
-                dtf_porcentaje = dtf_decimal * 100
-                return dtf_porcentaje
-            else:
-                print(f"ADVERTENCIA: No se encontró DTF para {año}-{mes:02d}. Por favor ingresa el valor manualmente.")
-                dtf_manual = float(input(f"DTF para {año}-{mes:02d} (%): "))
-                return dtf_manual
+def calcular_dias_mes_individual(fecha_cuenta, fecha_corte):
+    """Calcula días SOLO del mes específico de la cuenta"""
+    if fecha_cuenta >= fecha_corte:
+        return 0
+    
+    fecha_inicio_interes = fecha_cuenta.replace(day=1) + relativedelta(months=1)
+    
+    if fecha_corte <= fecha_inicio_interes:
+        return 0
+    
+    fecha_fin_efectiva = fecha_corte
+    delta = fecha_fin_efectiva - fecha_inicio_interes + relativedelta(days=1)
+    return delta.days
 
-        # ...existing code...
+def calcular_interes_mensual(capital, fecha_cuenta, fecha_corte):
+    """Calcula intereses SOLO para el mes específico de la cuenta"""
+    if fecha_cuenta >= fecha_corte:
+        return 0.0
+    
+    dtf_ea = obtener_dtf_mes(fecha_cuenta.year, fecha_cuenta.month) / 100
+    dias = calcular_dias_mes_individual(fecha_cuenta, fecha_corte)
+    
+    if dias > 0:
+        factor_interes = ((1 + dtf_ea) ** (dias / 365)) - 1
+        intereses = capital * factor_interes
+        return round(intereses, 2)
+    
+    return 0.0
+
 def calcular_interes_mensual_unico(capital_fijo, fecha_cuenta, fecha_corte):
     """Calcula interés usando DTF y días del MISMO mes de la cuenta (como en Excel)"""
     if fecha_cuenta >= fecha_corte:
         return 0.0
+    
     # El interés se calcula usando DTF y días del MISMO mes de la cuenta
+    # Ejemplo: Cuenta Sep 2022 → DTF Sep 2022 (10.99%) y días Sep 2022 (30 días)
+    
+    # Usar el mismo mes de la cuenta
     fecha_interes = fecha_cuenta
+    
+    # Si el mes está después de la fecha de corte, no hay interés
     if fecha_interes > fecha_corte:
         return 0.0
+    
+    # Obtener DTF del mismo mes de la cuenta
     dtf_ea = obtener_dtf_mes(fecha_interes.year, fecha_interes.month) / 100
+    
     # Calcular días del mismo mes de la cuenta
     if fecha_interes.month == 12:
         fecha_fin_mes = date(fecha_interes.year + 1, 1, 1) - relativedelta(days=1)
     else:
-        fecha_fin_mes = date(fecha_interes.year, fecha_interes.month + 1, 1) - relativedelta(days=1)
-    dias_mes = fecha_fin_mes.day
-    if dias_mes > 0:
-        factor_interes = ((1 + dtf_ea) ** (dias_mes / 365)) - 1
-        interes_mes = capital_fijo * factor_interes
-        return round(interes_mes, 2)
-    return 0.0
         fecha_fin_mes = date(fecha_interes.year, fecha_interes.month + 1, 1) - relativedelta(days=1)
     
     # Días del mes completo (generalmente 30 o 31)
@@ -172,20 +263,38 @@ def calcular_interes_mensual_unico(capital_fijo, fecha_cuenta, fecha_corte):
     
     return 0.0
 
+from app.settings import MESES_PRESCRIPCION
+
+def generar_cuentas_prescripcion(pensionado, fecha_corte):
+    """Genera cuentas por los últimos MESES_PRESCRIPCION meses hasta fecha_corte (inclusive)."""
+    # Inicio dinámico: primer día del mes, N-29 meses atrás si N=30
+    fecha_fin_mes = date(fecha_corte.year, fecha_corte.month, 1)
+    from dateutil.relativedelta import relativedelta
+    fecha_inicial = fecha_fin_mes - relativedelta(months=MESES_PRESCRIPCION - 1)
+    return _generar_cuentas_periodo(pensionado, fecha_inicial, fecha_corte, MESES_PRESCRIPCION)
+
+# Compatibilidad hacia atrás
 def generar_36_cuentas_pensionado(pensionado, fecha_corte):
-    """Genera las 36 cuentas independientes para un pensionado - Sep 2022 a Ago 2025"""
-    fecha_inicial = date(2022, 9, 1)  # Sep 2022
-    return _generar_cuentas_periodo(pensionado, fecha_inicial, fecha_corte, 36)
+    return generar_cuentas_prescripcion(pensionado, fecha_corte)
 
+def generar_cuentas_prescripcion_oct(pensionado, fecha_corte):
+    """Genera cuentas por los últimos MESES_PRESCRIPCION meses; variante conservada por compatibilidad."""
+    # Igual a generar_cuentas_prescripcion bajo nueva regla
+    return generar_cuentas_prescripcion(pensionado, fecha_corte)
+
+# Compatibilidad hacia atrás
 def generar_36_cuentas_pensionado_oct(pensionado, fecha_corte):
-    """Genera las 36 cuentas independientes para un pensionado - Oct 2022 a Ago 2025"""
-    fecha_inicial = date(2022, 10, 1)  # Oct 2022
-    return _generar_cuentas_periodo(pensionado, fecha_inicial, fecha_corte, 36)
+    return generar_cuentas_prescripcion_oct(pensionado, fecha_corte)
 
-def generar_36_cuentas_pensionado_custom(pensionado, año_inicio, mes_inicio, fecha_corte, num_meses=36):
-    """Genera cuentas para un pensionado desde cualquier mes/año especificado hasta la fecha de corte"""
+def generar_cuentas_prescripcion_custom(pensionado, año_inicio, mes_inicio, fecha_corte, num_meses=None):
+    """Genera cuentas para un pensionado desde cualquier mes/año especificado hasta la fecha de corte, con límite por prescripción."""
     fecha_inicial = date(año_inicio, mes_inicio, 1)
-    return _generar_cuentas_periodo(pensionado, fecha_inicial, fecha_corte, num_meses)
+    limite = num_meses if num_meses is not None else MESES_PRESCRIPCION
+    return _generar_cuentas_periodo(pensionado, fecha_inicial, fecha_corte, limite)
+
+# Compatibilidad hacia atrás
+def generar_36_cuentas_pensionado_custom(pensionado, año_inicio, mes_inicio, fecha_corte, num_meses=30):
+    return generar_cuentas_prescripcion_custom(pensionado, año_inicio, mes_inicio, fecha_corte, num_meses)
 
 def _generar_cuentas_periodo(pensionado, fecha_inicial, fecha_corte, num_meses):
     """Función auxiliar para generar cuentas en un período específico"""
@@ -209,7 +318,7 @@ def _generar_cuentas_periodo(pensionado, fecha_inicial, fecha_corte, num_meses):
     # Ajustar base de cálculo de 2025 al año de la cuenta de cobro usando IPC
     base_ajustada_ipc = ajustar_base_por_ipc(base_calculo, año_cuenta_cobro)
     ipc_factor = base_calculo / base_ajustada_ipc if base_ajustada_ipc != 0 else 1.0
-    # CAPITAL FIJO para toda la tabla de intereses: base ajustada × % cuota parte
+    # Capital base mensual (sin prima); este es el capital "base" para interés
     capital_fijo_tabla = base_ajustada_ipc * porcentaje_cuota_parte
 
     for i in range(num_meses):  # Número de meses especificado
@@ -217,16 +326,19 @@ def _generar_cuentas_periodo(pensionado, fecha_inicial, fecha_corte, num_meses):
         año = fecha_mes.year
         mes = fecha_mes.month
 
-        # Prima solo afecta el capital para la cuenta de cobro, NO para intereses
+        # Determinar si el mes tiene prima; el capital del periodo se usa para intereses
         prima = 0
         capital_final = capital_fijo_tabla
         if tiene_prima_mes(numero_mesadas, mes):
-            prima = capital_fijo_tabla  # Prima equivalente
+            prima = capital_fijo_tabla  # Prima equivalente (capital adicional del periodo)
             capital_final = capital_fijo_tabla + prima
 
-        # INTERÉS SIEMPRE sobre el capital base de la cuenta de cobro (ajustado por IPC y porcentaje), nunca duplicado por prima
+        # Interés del mes calculado sobre el capital del periodo (incluye prima cuando aplique)
         fecha_cuenta = date(año, mes, 1)
-        interes_mensual = calcular_interes_mensual_unico(capital_fijo_tabla, fecha_cuenta, fecha_corte)
+        capital_base_interes = capital_final
+
+        # El capital para calcular los intereses del periodo considera prima si existe
+        interes_mensual = calcular_interes_mensual_unico(capital_base_interes, fecha_cuenta, fecha_corte)
 
         # Obtener días y DTF del mismo mes de la cuenta para mostrar en reporte
         mes_interes = fecha_cuenta  # Mismo mes, no mes siguiente
@@ -242,12 +354,16 @@ def _generar_cuentas_periodo(pensionado, fecha_inicial, fecha_corte, num_meses):
             dtf_interes = 0.0
             dias_interes = 0
 
+        # Mostrar el capital en la columna 'capital_base' como base fija; duplicar visualmente si hay prima
+        capital_base_tabla = capital_fijo_tabla * 2 if tiene_prima_mes(numero_mesadas, mes) else capital_fijo_tabla
         cuenta = {
             'año': año,
             'mes': mes,
             'fecha_cuenta': fecha_cuenta,
-            'capital': capital_fijo_tabla,  # SIEMPRE el capital base de la cuenta de cobro (ajustado por IPC y porcentaje), nunca duplicado por prima
-            'capital_base': capital_fijo_tabla,
+            'capital': capital_fijo_tabla,  # Capital base sin prima (referencia única)
+            'capital_base': capital_base_tabla,
+            # Valor de cuota del periodo (base + prima cuando aplique) para mostrar en PDF
+            'valor_cuota_periodo': capital_final,
             'interes': interes_mensual,
             'prima': prima,
             'porcentaje_cuota': porcentaje_cuota_parte * 100,
@@ -263,34 +379,6 @@ def _generar_cuentas_periodo(pensionado, fecha_inicial, fecha_corte, num_meses):
     return cuentas
 
 def mostrar_liquidacion_tabla():
-    # Mostrar la DTF usada para diciembre 2022
-    dtf_dic_2022 = obtener_dtf_mes(2022, 12)
-    print(f"DTF usada para diciembre 2022: {dtf_dic_2022:.2f}%")
-    # Desglose mes a mes de la cartera de diciembre 2022
-    print()
-    print("DESGLOSE DE CARTERA DICIEMBRE 2022 MES A MES:")
-    base_calculo = float(pensionado[5])
-    numero_mesadas = pensionado[2]
-    año_cartera = 2022
-    mes_cartera = 12
-    fecha_fin_cartera = date(2025, 8, 31)
-    base_ajustada_ipc = ajustar_base_por_ipc(base_calculo, año_cartera)
-    capital_fijo_mes = base_ajustada_ipc * cuentas[0]['porcentaje_cuota'] / 100
-    if tiene_prima_mes(numero_mesadas, mes_cartera):
-        capital_fijo_mes = capital_fijo_mes * 2
-    fecha_inicio = date(año_cartera, mes_cartera, 1)
-    num_meses = (fecha_fin_cartera.year - año_cartera) * 12 + (fecha_fin_cartera.month - mes_cartera) + 1
-    total_intereses = 0.0
-    for j in range(num_meses):
-        fecha_interes = fecha_inicio + relativedelta(months=j)
-        año_int = fecha_interes.year
-        mes_int = fecha_interes.month
-        fecha_cuenta_int = date(año_int, mes_int, 1)
-        interes_mensual = calcular_interes_mensual_unico(capital_fijo_mes, fecha_cuenta_int, fecha_fin_cartera)
-        total_intereses += interes_mensual
-        print(f"{fecha_cuenta_int.strftime('%b %Y')}: Capital ${capital_fijo_mes:,.2f} + Interés ${interes_mensual:,.2f} = ${capital_fijo_mes + interes_mensual:,.2f}")
-    print(f"TOTAL INTERESES: ${total_intereses:,.2f}")
-    print(f"TOTAL CARTERA DICIEMBRE 2022: ${capital_fijo_mes + total_intereses:,.2f}")
     # Mostrar cartera de cuenta de cobro de diciembre 2022
     año_cartera = 2022
     mes_cartera = 12
@@ -387,14 +475,7 @@ def mostrar_liquidacion_tabla():
 
         print(f"{i+1:2d}   {fecha_str:10s}  ${base_ajustada:10,.2f}  ${capital_base:10,.2f}  {dias:3d}  {dtf:5.2f}%  ${interes_mensual:10,.2f}  ${total_cuenta:11,.2f}")
 
-    # Totales finales: mostrar capital único (capital base), sumar intereses y total final
-    gran_total_capital = cuentas[0]['capital_base'] if cuentas else 0.0
-    gran_total_intereses = total_intereses_todas_cuentas
-    gran_total = gran_total_capital + gran_total_intereses
-
-    print("-" * 105)
-    print(f"TOTALES:                                               ${gran_total_capital:10,.2f}           ${gran_total_intereses:10,.2f}  ${gran_total:11,.2f}")
-    print("-" * 105)
+    # Eliminar la fila de totales en la tabla de intereses para periodos personalizados
     print()
     print("SISTEMA CORREGIDO - 36 MESES HACIA ATRÁS:")
     print(f"- Fecha inicio: {cuentas[0]['fecha_cuenta'].strftime('%b %Y')}")

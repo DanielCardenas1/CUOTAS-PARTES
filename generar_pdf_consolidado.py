@@ -31,7 +31,9 @@ from sqlalchemy import text, select, func
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 from app.db import get_session, engine
 from app.models import Base, CuentaCobro
-from mostrar_liquidacion_36 import generar_36_cuentas_pensionado
+from mostrar_liquidacion_36 import generar_cuentas_prescripcion
+from app.settings import MESES_PRESCRIPCION
+from dateutil.relativedelta import relativedelta
 
 
 # ---------------- Consecutivo y trazabilidad (reutilizado) -----------------
@@ -164,8 +166,9 @@ def _consultar_entidad_y_pensionados(nit: str):
         return entidad, pensionados
 
 def _agrupar_consolidadopor_pensionado(pensionado_row) -> dict:
-    """Calcula totales para un pensionado usando generar_36_cuentas_pensionado."""
-    cuentas = generar_36_cuentas_pensionado(pensionado_row, date(2025, 8, 31))
+    """Calcula totales para un pensionado usando los meses de prescripción configurados."""
+    fecha_corte = date(2025, 8, 31)
+    cuentas = generar_cuentas_prescripcion(pensionado_row, fecha_corte)
     total_capital = sum(c['capital'] for c in cuentas)
     total_intereses = sum(c['interes'] for c in cuentas)
     periodo_inicio = cuentas[0]['fecha_cuenta'] if cuentas else date(2022, 9, 1)
@@ -208,6 +211,7 @@ def generar_pdf_consolidado(nit: str, deudor: str = "SERVICIO NACIONAL DE APREND
     # No generar un resumen consolidado por mes aquí: el consolidado debe presentarse
     # por pensionado (tabla detallada por pensionado). Se calculan únicamente las
     # fechas de inicio y fin para el encabezado y registro de trazabilidad.
+    # Periodo se toma de los datos calculados (últimos MESES_PRESCRIPCION meses a la fecha de corte)
     inicio = min(f['periodo_inicio'] for f in filas)
     fin = max(f['periodo_fin'] for f in filas)
 
