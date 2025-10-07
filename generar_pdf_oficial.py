@@ -16,7 +16,7 @@ import argparse
 from reportlab.lib.pagesizes import letter, A4
 from reportlab.lib import colors
 from reportlab.lib.units import inch, cm
-from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer, PageBreak
+from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer, PageBreak, KeepTogether, Image as RLImage
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.lib.enums import TA_CENTER, TA_LEFT, TA_RIGHT
 from reportlab.pdfgen import canvas
@@ -80,7 +80,7 @@ def _ensure_unique_filename(base_name: str) -> str:
     ts = datetime.now().strftime('%Y%m%d%H%M%S')
     return f"{base}_{ts}{ext}"
 
-def generar_pdf_para_pensionado(pensionado, periodo='sep', año_inicio=None, mes_inicio=None, solo_mes: bool = False, output_dir: str | None = None):
+def generar_pdf_para_pensionado(pensionado, periodo='sep', año_inicio=None, mes_inicio=None, solo_mes: bool = False, output_dir: str | None = None, display_consecutivo: int | None = None, titulo_override: str | None = None, persistir_en_bd: bool = True):
     """Genera un PDF para un pensionado ya consultado.
 
     Espera una tupla en el siguiente orden (para compatibilidad con mostrar_liquidacion_36):
@@ -234,8 +234,8 @@ def generar_pdf_para_pensionado(pensionado, periodo='sep', año_inicio=None, mes
         pagesize=A4,
         rightMargin=0.5*cm,
         leftMargin=0.5*cm,
-        topMargin=1*cm,
-        bottomMargin=1*cm
+        topMargin=0.7*cm,   # Reducir un poco más el margen superior
+        bottomMargin=0.6*cm # Reducir margen inferior para que quepan firmas
     )
     
     # Estilos
@@ -289,8 +289,8 @@ def generar_pdf_para_pensionado(pensionado, periodo='sep', año_inicio=None, mes
     encabezado_style = ParagraphStyle(
         'EncabezadoCustom',
         parent=styles['Normal'],
-        fontSize=12,
-        spaceAfter=8,
+        fontSize=11,   # Reducir tamaño del encabezado
+        spaceAfter=4,  # Menos espacio debajo del encabezado
         alignment=TA_LEFT,
         textColor=colors.black,
         fontName='Helvetica-Bold'
@@ -300,8 +300,8 @@ def generar_pdf_para_pensionado(pensionado, periodo='sep', año_inicio=None, mes
     cuenta_cobro_style = ParagraphStyle(
         'CuentaCobroCustom',
         parent=styles['Normal'],
-        fontSize=12,
-        spaceAfter=8,
+        fontSize=11,   # Reducir tamaño del título de cuenta de cobro
+        spaceAfter=4,  # Menos espacio debajo del título
         alignment=TA_RIGHT,
         textColor=colors.black,
         fontName='Helvetica-Bold'
@@ -310,61 +310,31 @@ def generar_pdf_para_pensionado(pensionado, periodo='sep', año_inicio=None, mes
     # Construir contenido del PDF según formato de la imagen
     story = []
     
-    # ENCABEZADO CON CIUDAD Y CONSECUTIVO (gestión en BD)
-    _ensure_cuenta_table()
+    # ENCABEZADO CON CIUDAD Y CONSECUTIVO (gestión en BD + consecutivo visual opcional)
+    # Persistencia en BD sólo si corresponde (cuentas de cobro consolidadas). Las liquidaciones individuales no incrementan consecutivo.
+    consecutivo_cc = None
+    if persistir_en_bd:
+        _ensure_cuenta_table()
     # Fechas de periodo para registro
     periodo_inicio_fecha = cuentas[0]['fecha_cuenta'] if cuentas else date(2022, 9, 1)
     periodo_fin_fecha = cuentas[-1]['fecha_cuenta'] if cuentas else date(2025, 8, 31)
     nit_text = str(pensionado[7]) if len(pensionado) > 7 and pensionado[7] else 'N/D'
     # Calcular/obtener consecutivo
-    with get_session() as s:
-        existente = _db_find_existing(s, nit_text, pensionado[0], periodo_inicio_fecha, periodo_fin_fecha)
-        consecutivo_cc = None
-        if CONSEC_OVERRIDE is not None:
-            consecutivo_cc = int(CONSEC_OVERRIDE)
-        elif CONSEC_CORRECCION and existente is not None:
-            consecutivo_cc = existente.consecutivo
-        else:
-            # Nuevo consecutivo global
-            consecutivo_cc = _db_get_next_consecutivo(s)
-        
-        # Crear o actualizar registro de trazabilidad
-        ahora = datetime.now()
-        # Guardar en BD el nombre real del PDF generado (sin la ruta completa)
-        pdf_name_preview = os.path.basename(ruta_pdf)
-        if existente is None:
-            reg = CuentaCobro(
-                consecutivo=consecutivo_cc,
-                nit_entidad=nit_text,
-                empresa=pensionado[4],
-                pensionado_identificacion=str(pensionado[0]),
-                pensionado_nombre=pensionado[1],
-                periodo_inicio=periodo_inicio_fecha,
-                periodo_fin=periodo_fin_fecha,
-                total_capital=total_capital,
-                total_intereses=total_intereses,
-                total_liquidacion=total_final,
-                archivo_pdf=pdf_name_preview,
-                estado='EMITIDA' if CONSEC_OVERRIDE is None else 'EMITIDA_MANUAL',
-                version=1,
-                fecha_creacion=ahora,
-                fecha_actualizacion=ahora,
-            )
-            s.add(reg)
-            s.commit()
-        else:
-            # Existe mismo periodo; si corrección, solo actualizamos totales;
-            # si no es corrección y no se forzó, incrementamos versión y creamos nueva entrada con nuevo consecutivo
-            if CONSEC_CORRECCION and CONSEC_OVERRIDE is None:
-                existente.total_capital = total_capital
-                existente.total_intereses = total_intereses
-                existente.total_liquidacion = total_final
-                existente.archivo_pdf = pdf_name_preview
-                existente.estado = 'CORREGIDA'
-                existente.fecha_actualizacion = ahora
-                s.commit()
+    if persistir_en_bd:
+        with get_session() as s:
+            existente = _db_find_existing(s, nit_text, pensionado[0], periodo_inicio_fecha, periodo_fin_fecha)
+            if CONSEC_OVERRIDE is not None:
+                consecutivo_cc = int(CONSEC_OVERRIDE)
+            elif CONSEC_CORRECCION and existente is not None:
                 consecutivo_cc = existente.consecutivo
             else:
+                # Nuevo consecutivo global (sólo para cuentas de cobro consolidadas)
+                consecutivo_cc = _db_get_next_consecutivo(s)
+
+            # Crear o actualizar registro de trazabilidad
+            ahora = datetime.now()
+            pdf_name_preview = os.path.basename(ruta_pdf)
+            if existente is None:
                 reg = CuentaCobro(
                     consecutivo=consecutivo_cc,
                     nit_entidad=nit_text,
@@ -377,16 +347,49 @@ def generar_pdf_para_pensionado(pensionado, periodo='sep', año_inicio=None, mes
                     total_intereses=total_intereses,
                     total_liquidacion=total_final,
                     archivo_pdf=pdf_name_preview,
-                    estado='EMITIDA',
-                    version=(existente.version or 1) + 1,
+                    estado='EMITIDA' if CONSEC_OVERRIDE is None else 'EMITIDA_MANUAL',
+                    version=1,
                     fecha_creacion=ahora,
                     fecha_actualizacion=ahora,
                 )
                 s.add(reg)
                 s.commit()
+            else:
+                if CONSEC_CORRECCION and CONSEC_OVERRIDE is None:
+                    existente.total_capital = total_capital
+                    existente.total_intereses = total_intereses
+                    existente.total_liquidacion = total_final
+                    existente.archivo_pdf = pdf_name_preview
+                    existente.estado = 'CORREGIDA'
+                    existente.fecha_actualizacion = ahora
+                    s.commit()
+                    consecutivo_cc = existente.consecutivo
+                else:
+                    reg = CuentaCobro(
+                        consecutivo=consecutivo_cc,
+                        nit_entidad=nit_text,
+                        empresa=pensionado[4],
+                        pensionado_identificacion=str(pensionado[0]),
+                        pensionado_nombre=pensionado[1],
+                        periodo_inicio=periodo_inicio_fecha,
+                        periodo_fin=periodo_fin_fecha,
+                        total_capital=total_capital,
+                        total_intereses=total_intereses,
+                        total_liquidacion=total_final,
+                        archivo_pdf=pdf_name_preview,
+                        estado='EMITIDA',
+                        version=(existente.version or 1) + 1,
+                        fecha_creacion=ahora,
+                        fecha_actualizacion=ahora,
+                    )
+                    s.add(reg)
+                    s.commit()
+    # El número a mostrar puede ser distinto al registrado en BD si se pasa display_consecutivo
+    numero_visible = display_consecutivo if (display_consecutivo is not None) else consecutivo_cc
+    titulo_header = (titulo_override or 'CUENTA DE COBRO')
     encabezado_data = [
         [Paragraph('BOGOTA, D.C.', encabezado_style), 
-        Paragraph(f'CUENTA DE COBRO<br/>Nro. {consecutivo_cc}', cuenta_cobro_style)]
+        Paragraph(f'{titulo_header}<br/>Nro. {numero_visible}', cuenta_cobro_style)]
     ]
     
     tabla_encabezado = Table(encabezado_data, colWidths=[7*cm, 7*cm])
@@ -399,18 +402,21 @@ def generar_pdf_para_pensionado(pensionado, periodo='sep', año_inicio=None, mes
     ]))
     
     story.append(tabla_encabezado)
-    story.append(Spacer(1, 0.5*cm))
+    story.append(Spacer(1, 0.25*cm))  # Subir contenidos reduciendo este espacio
     
     # INFORMACIÓN COMPLETA (ENTIDAD + PENSIONADO)
     # Calcular el ancho total de las otras tablas para que coincidan
     ancho_total_otras_tablas = 2.5*cm + 2.5*cm + 2*cm + 2.5*cm + 2*cm + 2.5*cm  # Total: 14cm
 
     nit_text = str(pensionado[7]) if len(pensionado) > 7 and pensionado[7] else 'N/D'
+    # Convertir valores a Paragraph para asegurar ajuste de línea dentro de la celda (evita desbordes)
+    info_val_style = ParagraphStyle('InfoValWrap', parent=styles['Normal'], fontSize=8, alignment=TA_LEFT, leading=9)
+    info_lbl_style = ParagraphStyle('InfoLbl', parent=styles['Normal'], fontSize=8, alignment=TA_LEFT, leading=9)
     info_superior = [
-        ['Entidad', f'{pensionado[4]} - NIT. {nit_text}'],
-        ['Período', f'CUOTAS PARTES POR COBRAR {periodo_texto}'],
-        ['Nombre', f'{pensionado[1]}'],
-        ['Identificación', f'{pensionado[0]}']
+        [Paragraph('Entidad', info_lbl_style), Paragraph(f"{pensionado[4]} - NIT. {nit_text}", info_val_style)],
+        [Paragraph('Período', info_lbl_style), Paragraph(f'CUOTAS PARTES POR COBRAR {periodo_texto}', info_val_style)],
+        [Paragraph('Nombre', info_lbl_style), Paragraph(f'{pensionado[1]}', info_val_style)],
+        [Paragraph('Identificación', info_lbl_style), Paragraph(f'{pensionado[0]}', info_val_style)],
     ]
     
     # Solo agregar filas de sustituto si tienen datos
@@ -440,7 +446,7 @@ def generar_pdf_para_pensionado(pensionado, periodo='sep', año_inicio=None, mes
     ]))
     
     story.append(tabla_superior)
-    story.append(Spacer(1, 0.3*cm))
+    story.append(Spacer(1, 0.2*cm))
     
     # TABLA DE RESUMEN INTERMEDIA
     resumen_data = [
@@ -456,14 +462,14 @@ def generar_pdf_para_pensionado(pensionado, periodo='sep', año_inicio=None, mes
         ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
         ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
         ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
-        ('FONTSIZE', (0, 0), (-1, 0), 7),
+        ('FONTSIZE', (0, 0), (-1, 0), 6),   # Reducir tamaños para compactar
         ('FONTNAME', (0, 1), (-1, -1), 'Helvetica'),
-        ('FONTSIZE', (0, 1), (-1, -1), 7),
+        ('FONTSIZE', (0, 1), (-1, -1), 6),  # Reducir tamaños para compactar
         ('GRID', (0, 0), (-1, -1), 1, colors.black),
-        ('LEFTPADDING', (0, 0), (-1, -1), 3),
-        ('RIGHTPADDING', (0, 0), (-1, -1), 3),
-        ('TOPPADDING', (0, 0), (-1, -1), 2),
-        ('BOTTOMPADDING', (0, 0), (-1, -1), 2),
+        ('LEFTPADDING', (0, 0), (-1, -1), 2),
+        ('RIGHTPADDING', (0, 0), (-1, -1), 2),
+        ('TOPPADDING', (0, 0), (-1, -1), 1),
+        ('BOTTOMPADDING', (0, 0), (-1, -1), 1),
     ]))
     
     story.append(tabla_resumen)
@@ -474,8 +480,8 @@ def generar_pdf_para_pensionado(pensionado, periodo='sep', año_inicio=None, mes
     <b>JULIO 29/2006 - Art. 4 Ley 1066/2006 &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; CON INTERESES DTF</b>
     """
     
-    story.append(Paragraph(titulo_intereses, ParagraphStyle('TituloIntereses', parent=styles['Normal'], fontSize=8, alignment=TA_CENTER, fontName='Helvetica-Bold')))
-    story.append(Spacer(1, 0.2*cm))
+    story.append(Paragraph(titulo_intereses, ParagraphStyle('TituloIntereses', parent=styles['Normal'], fontSize=7, alignment=TA_CENTER, fontName='Helvetica-Bold')))
+    story.append(Spacer(1, 0.08*cm))
     
     # Estilo para cabeceras con texto ajustado
     header_style = ParagraphStyle(
@@ -515,9 +521,9 @@ def generar_pdf_para_pensionado(pensionado, periodo='sep', año_inicio=None, mes
                 capital_general = float(ref_vcp)
     
     # Estilos para celdas de datos
-    data_style_left = ParagraphStyle('DataLeft', parent=styles['Normal'], fontSize=6, fontName='Helvetica', alignment=TA_LEFT, leading=7)
-    data_style_center = ParagraphStyle('DataCenter', parent=styles['Normal'], fontSize=6, fontName='Helvetica', alignment=TA_CENTER, leading=7)
-    data_style_right = ParagraphStyle('DataRight', parent=styles['Normal'], fontSize=6, fontName='Helvetica', alignment=TA_RIGHT, leading=7)
+    data_style_left = ParagraphStyle('DataLeft', parent=styles['Normal'], fontSize=6, fontName='Helvetica', alignment=TA_LEFT, leading=6)
+    data_style_center = ParagraphStyle('DataCenter', parent=styles['Normal'], fontSize=6, fontName='Helvetica', alignment=TA_CENTER, leading=6)
+    data_style_right = ParagraphStyle('DataRight', parent=styles['Normal'], fontSize=6, fontName='Helvetica', alignment=TA_RIGHT, leading=6)
     
     meses_nombres = ["enero", "febrero", "marzo", "abril", "mayo", "junio",
                      "julio", "agosto", "septiembre", "octubre", "noviembre", "diciembre"]
@@ -591,11 +597,11 @@ def generar_pdf_para_pensionado(pensionado, periodo='sep', año_inicio=None, mes
         ('ROWBACKGROUNDS', (0, 1), (-1, -2), [colors.white, colors.lightgrey]),
         
         # Fila de totales
-    ('BACKGROUND', (0, -1), (-1, -1), colors.white),
-    ('TEXTCOLOR', (0, -1), (-1, -1), colors.black),
+        ('BACKGROUND', (0, -1), (-1, -1), colors.white),
+        ('TEXTCOLOR', (0, -1), (-1, -1), colors.black),
         ('VALIGN', (0, -1), (-1, -1), 'MIDDLE'),
-        ('TOPPADDING', (0, -1), (-1, -1), 4),
-        ('BOTTOMPADDING', (0, -1), (-1, -1), 4),
+        ('TOPPADDING', (0, -1), (-1, -1), 3),   # Menos padding en fila de totales
+    ('BOTTOMPADDING', (0, -1), (-1, -1), 2),
         
         # Bordes
         ('GRID', (0, 0), (-1, -1), 1, colors.black),
@@ -605,11 +611,71 @@ def generar_pdf_para_pensionado(pensionado, periodo='sep', año_inicio=None, mes
         # Padding general reducido
         ('LEFTPADDING', (0, 0), (-1, -1), 2),
         ('RIGHTPADDING', (0, 0), (-1, -1), 2),
-        ('TOPPADDING', (0, 1), (-1, -2), 2),
-        ('BOTTOMPADDING', (0, 1), (-1, -2), 2),
+        ('TOPPADDING', (0, 1), (-1, -2), 1),   # Reducir padding de filas
+        ('BOTTOMPADDING', (0, 1), (-1, -2), 1),
     ]))
     
     story.append(tabla)
+
+    # Por requerimiento: en los PDFs individuales no se incluye texto de notas ni bloque de firmas.
+    # Añadimos una breve explicación y un bloque de totales de 3 filas para claridad del alcance.
+    story.append(Spacer(1, 0.15*cm))
+    aclaratoria_style = ParagraphStyle('AclaratoriaIndividual', parent=styles['Normal'], fontSize=7, alignment=TA_LEFT, leading=9)
+    try:
+        meses_es_l = {
+            1: 'enero', 2: 'febrero', 3: 'marzo', 4: 'abril', 5: 'mayo', 6: 'junio',
+            7: 'julio', 8: 'agosto', 9: 'septiembre', 10: 'octubre', 11: 'noviembre', 12: 'diciembre'
+        }
+        periodo_ini_lbl = f"{meses_es_l[fecha_inicio.month]} {fecha_inicio.year}" if cuentas else ""
+        periodo_fin_lbl = f"{meses_es_l[fecha_fin.month]} de {fecha_fin.year}" if cuentas else ""
+        label_periodo = f"de {periodo_ini_lbl} a {periodo_fin_lbl}" if cuentas else ""
+        label_mes = periodo_ini_lbl if cuentas else ""
+        label_corte = f"{meses_es_l[fecha_corte.month]} de {fecha_corte.year}"
+    except Exception:
+        label_periodo = ""; label_mes = ""; label_corte = ""
+
+    story.append(Paragraph(
+        f"Liquidación de intereses DTF mes vencido (sin capitalización) sobre el capital del período; período {label_periodo}.",
+        aclaratoria_style
+    ))
+
+    # Tabla de totales (3 filas) similar al consolidado
+    # Primera fila: capital SOLO del mes de la cuenta
+    tot_label_cap = f"Capital del mes {label_mes}" if label_mes else "Capital del mes"
+    tot_label_int = f"Intereses causados (Ley 1066 de 2006) {label_periodo}" if label_periodo else "Intereses causados (Ley 1066 de 2006)"
+    tot_label_sum = f"Total de la deuda con corte {label_corte}" if label_corte else "Total de la deuda"
+
+    # Valor de capital del mes (no suma de rangos)
+    try:
+        capital_mes_val = float(
+            cuentas[0].get('valor_cuota_periodo', cuentas[0].get('capital', 0))
+        ) if cuentas else float(total_capital)
+    except Exception:
+        capital_mes_val = float(total_capital)
+
+    tot_data = [
+        [tot_label_cap, f"${capital_mes_val:,.2f}"],
+        [tot_label_int, f"${total_intereses:,.2f}"],
+        [tot_label_sum, f"${(capital_mes_val + total_intereses):,.2f}"],
+    ]
+
+    # Usar un ancho compacto: descripción + valor a la derecha
+    tot_col2 = 4.0*cm
+    tabla_totales = Table(tot_data, colWidths=[(ancho_total_otras_tablas - 0.01) - tot_col2, tot_col2])
+    tabla_totales.setStyle(TableStyle([
+        ('GRID', (0,0), (-1,-1), 1, colors.black),
+        ('VALIGN', (0,0), (-1,-1), 'MIDDLE'),
+        ('ALIGN', (0,0), (0,-1), 'LEFT'),
+        ('ALIGN', (1,0), (1,-1), 'RIGHT'),
+        ('FONTNAME', (0,0), (-1,-1), 'Helvetica'),
+        ('FONTSIZE', (0,0), (-1,-1), 7),
+        ('LEFTPADDING', (0,0), (-1,-1), 4),
+        ('RIGHTPADDING', (0,0), (-1,-1), 4),
+        ('TOPPADDING', (0,0), (-1,-1), 2),
+        ('BOTTOMPADDING', (0,0), (-1,-1), 2),
+    ]))
+    story.append(Spacer(1, 0.08*cm))
+    story.append(tabla_totales)
     
     # Generar PDF (reintenta con nombre alterno si hay PermissionError)
     try:
@@ -622,8 +688,8 @@ def generar_pdf_para_pensionado(pensionado, periodo='sep', año_inicio=None, mes
             pagesize=A4,
             rightMargin=0.5*cm,
             leftMargin=0.5*cm,
-            topMargin=1*cm,
-            bottomMargin=1*cm
+            topMargin=0.7*cm,
+            bottomMargin=0.6*cm
         )
         doc.build(story)
         ruta_pdf = ruta_pdf_alt
