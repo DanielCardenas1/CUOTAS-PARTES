@@ -22,8 +22,7 @@ def obtener_pensionados_entidad(session, entidad_nit):
             p.fecha_ingreso_nomina,
             p.estado_cartera,
             p.nit_entidad,
-            COALESCE(p.base_calculo_cuota_parte, 383628.0) as base_calculo,
-            p.res_no
+            COALESCE(p.base_calculo_cuota_parte, 383628.0) as base_calculo
         FROM pensionado p
         WHERE p.nit_entidad = :entidad_nit 
         AND p.estado_cartera = 'ACTIVO'
